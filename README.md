@@ -1,0 +1,2 @@
+# Quant_Invest
+O Quant_Invest** é um Sistema de Suporte à Decisão de Investimentos desenvolvido na forma de um Web App interativo utilizando Streamlit. O objetivo principal do projeto é evoluir ao longo do semestre, deixando de ser um mero visualizador de dados para se transformar em uma plataforma analítica robusta que integra filtros econométricos de risco, inteligência artificial preditiva e algoritmos de otimização quantitativa de portfólios.
