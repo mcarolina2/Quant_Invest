@@ -23,8 +23,8 @@ BENCHMARKS = [
 START_DATE = "2015-01-01"
 
 # ---------------------------------------------------------
-# SOLUÇÃO: Criar uma sessão customizada para evitar bloqueios
-# ---------------------------------------------------------
+# SOLUÇÃO: Criar uma sessão customizada para evitar bloqueios(tive um pouco de problema para acessar o yfinance)
+
 session = requests.Session()
 session.headers.update(
     {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}

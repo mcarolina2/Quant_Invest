@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
-DATA_DIR ="modules\data"
+DATA_DIR ="data"
 
 
 @st.cache_data(ttl=3600)

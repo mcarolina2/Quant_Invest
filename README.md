@@ -49,8 +49,15 @@ O projeto é desenvolvido puramente em **Python**, utilizando o seguinte ecossis
 ```text
 Quant_Invest/
 │
-├── app.py                  # Arquivo principal que executa a interface Streamlit
-├── requirements.txt        # Dependências do projeto para replicação do ambiente
-├── README.md               # Documentação do projeto
+├── data/                   # [Gerado automaticamente] Armazena os dados históricos em formato Parquet
 │
-└── data/                   # Diretório opcional para armazenamento local ou cache de fatores
+├── modules/                # Módulos core de dados e modelos matemáticos
+│   ├── data_loader.py      # Carrega, limpa e alinha as séries temporais aplicando filtros de data
+│   ├── update_data.py      # Script autônomo que baixa dados da B3/Yahoo Finance com proteção anti-bloqueio
+│   ├── capm.py             # Implementação do Capital Asset Pricing Model (Cálculo de Alfas e Betas)
+│   ├── fama_french.py      # Modelo de 3 fatores para identificação de prêmios de risco
+│   └── garch.py            # Modelagem de volatilidade autoregressiva condicional heterocedástica
+│
+├── app.py                  # Arquivo principal que executa a interface gráfica no Streamlit
+├── requirements.txt        # Dependências do projeto para replicação exata do ambiente
+└── README.md               # Documentação e guia de uso do sistema

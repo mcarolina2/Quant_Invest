@@ -26,7 +26,7 @@ def run_garch(returns: pd.Series, p: int = 1, q: int = 1) -> dict | None:
         beta_sum = sum(params.get(f"beta[{i}]", 0) for i in range(1, q + 1))
         persistence = alpha_sum + beta_sum
 
-        # Parameter table
+        #tabela de parametros
         summary = pd.DataFrame({
             "Coeficiente": res.params,
             "Erro Padrão": res.std_err,
