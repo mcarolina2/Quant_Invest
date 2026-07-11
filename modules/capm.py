@@ -5,13 +5,8 @@ from statsmodels.tools import add_constant
 
 
 def run_capm(returns: pd.DataFrame, mkt_returns: pd.Series, rf_annual: float) -> dict:
-    """
-    Estimate CAPM for each asset.
-    Returns dict of metrics per ticker.
-    """
     rf_daily = (1 + rf_annual) ** (1 / 252) - 1
     results = {}
-
     mkt_excess = mkt_returns - rf_daily
     mkt_annual_return = (1 + mkt_returns.mean()) ** 252 - 1
 
@@ -21,7 +16,6 @@ def run_capm(returns: pd.DataFrame, mkt_returns: pd.Series, rf_annual: float) ->
 
         y = asset_excess.loc[common_idx].values
         x = mkt_excess.loc[common_idx].values
-
         X = add_constant(x)
         model = OLS(y, X).fit(cov_type="HC3")
 
@@ -38,7 +32,6 @@ def run_capm(returns: pd.DataFrame, mkt_returns: pd.Series, rf_annual: float) ->
         expected_return = rf_annual + risk_premium
         realized_return = (1 + returns[ticker].mean()) ** 252 - 1
 
-        # conf_int may be ndarray or DataFrame depending on statsmodels version
         try:
             ci_low = float(conf_int[1, 0]) if hasattr(conf_int, '__getitem__') and not hasattr(conf_int, 'iloc') else float(conf_int.iloc[1, 0])
             ci_high = float(conf_int[1, 1]) if hasattr(conf_int, '__getitem__') and not hasattr(conf_int, 'iloc') else float(conf_int.iloc[1, 1])

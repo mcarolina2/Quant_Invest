@@ -1,4 +1,20 @@
 import streamlit as st
+from modules.data_loader import load_data
+from modules.capm import run_capm
+from modules.fama_french import run_fama_french
+from modules.garch import run_garch
+from modules.risk_metrics import compute_risk_metrics
+from modules.features import build_features, train_test_split_ts
+from modules.ml_models import run_random_forest, run_xgboost, run_lightgbm, HAS_XGB, HAS_LGB
+from modules.dl_models import run_lstm, run_gru, HAS_TORCH
+from modules.backtesting import run_backtest
+from modules.b3_tickers import (get_all_tickers, get_sectors, get_tickers_by_sector, B3_TICKERS_BY_SECTOR)
+import plotly.graph_objects as go
+import plotly.express as px
+import pandas as pd
+import numpy as np
+import scipy.stats as stats
+
 
 st.set_page_config(
     page_title="Sistema de Suporte à Decisão de Investimentos",
@@ -47,15 +63,61 @@ st.markdown('<div class="sub-header">Fase I — Filtro de Risco e Econometria | 
 with st.sidebar:
     st.header("⚙️ Configurações")
 
-    st.subheader("Ativos")
-    tickers_input = st.text_area(
-        "Tickers (um por linha)",
-        value="PETR4.SA\nVALE3.SA\nITUB4.SA\nBBDC4.SA\nABEV3.SA",
-        height=120,
-        help="Use sufixo .SA para ativos brasileiros (B3)"
+    st.subheader("📋 Seleção de Ativos")
+         #Modo de seleção
+    modo = st.radio(
+        "Modo de entrada",
+        ["🔍 Busca por ativo", "📂 Por setor", "✏️ Digitar manualmente"],
+        horizontal=True,
+        label_visibility="collapsed",
     )
-    tickers = [t.strip().upper() for t in tickers_input.split("\n") if t.strip()]
-
+    
+    if modo == "🔍 Busca por ativo":
+        tickers = st.multiselect(
+            "Busque e selecione os ativos:",
+            options=get_all_tickers(),
+            default=["PETR4.SA", "VALE3.SA", "ITUB4.SA", "BBDC4.SA", "ABEV3.SA"],
+            placeholder="Digite o ticker (ex: PETR4.SA)...",
+            help="Todos os principais ativos da B3. Digite para filtrar.",
+        )
+    
+    elif modo == "📂 Por setor":
+        setor_sel = st.selectbox(
+            "Setor:",
+            options=get_sectors(),
+            index=0,
+        )
+        opcoes_setor = get_tickers_by_sector(setor_sel)
+        tickers = st.multiselect(
+            f"Ativos de {setor_sel}:",
+            options=opcoes_setor,
+            default=opcoes_setor[:3] if len(opcoes_setor) >= 3 else opcoes_setor,
+            placeholder="Selecione um ou mais ativos...",
+        )
+    
+    else:  # ✏️ Digitar manualmente
+        tickers_input = st.text_area(
+            "Tickers (um por linha)",
+            value="PETR4.SA\nVALE3.SA\nITUB4.SA\nBBDC4.SA\nABEV3.SA",
+            height=130,
+            help="Qualquer ticker do Yahoo Finance. Sufixo .SA para B3.",
+        )
+        tickers = [t.strip().upper() for t in tickers_input.splitlines() if t.strip()]
+    
+    # ── Validação e feedback visual ───────────────────────────────────────────────
+    if not tickers:
+        st.warning("⚠️ Selecione pelo menos um ativo.")
+    else:
+        st.caption(f"✅ {len(tickers)} ativo(s) selecionado(s)")
+        # Preview compacto dos selecionados
+        with st.expander("Ver ativos selecionados", expanded=False):
+            for t in tickers:
+                setor_do_ticker = next(
+                    (s for s, lst in B3_TICKERS_BY_SECTOR.items() if t in lst),
+                    "Externo / Manual"
+                )
+                st.write(f"`{t}` — {setor_do_ticker}")
+#── Período ───
     st.subheader("Período de Análise")
     import datetime
     col1, col2 = st.columns(2)
@@ -63,9 +125,10 @@ with st.sidebar:
         start_date = st.date_input("Início", value=datetime.date(2020, 1, 1), key="date_start")
     with col2:
         end_date = st.date_input("Fim", value=datetime.date.today(), key="date_end")
-
     start_str = str(start_date)
     end_str = str(end_date)
+
+ # ── Benchmark ─
 
     st.subheader("Benchmark & Mercado")
     benchmark = st.selectbox(
@@ -78,12 +141,46 @@ with st.sidebar:
         min_value=0.0, max_value=30.0, value=10.75, step=0.25,
         help="Selic atual como proxy"
     ) / 100
+# ── Filtros CAPM ────
+    st.subheader("🔍 Filtros de Risco (CAPM)")
+    beta_min, beta_max = st.slider("Intervalo de Beta", 0.0, 3.0, (0.0, 3.0), step=0.05)
+    alpha_min = st.number_input("Alpha mínimo (a.a.)", value=-1.0, step=0.01, format="%.2f")
 
+# ── GARCH ────
     st.subheader("Parâmetros GARCH")
     garch_p = st.slider("Ordem p (ARCH)", 1, 3, 1)
     garch_q = st.slider("Ordem q (GARCH)", 1, 3, 1)
 
     run_btn = st.button("🚀 Executar Análise", type="primary", use_container_width=True)
+
+ # ── ML ────────────────────────────────────────────────────────────────────
+    st.subheader("🤖 Machine Learning")
+    ml_ticker = st.selectbox("Ativo para ML/DL", tickers if tickers else ["PETR4.SA"])
+    ml_horizon = st.slider("Horizonte de Previsão (dias)", 1, 10, 1)
+    ml_test_ratio = st.slider("Proporção de Teste (%)", 10, 40, 20) / 100
+
+    with st.expander("Parâmetros RF / Boosting"):
+        rf_n_est  = st.slider("RF — N° Estimadores", 50, 500, 200, 50)
+        rf_depth  = st.slider("RF — Profundidade Máx.", 2, 10, 5)
+        xgb_n_est = st.slider("XGB/LGB — N° Estimadores", 50, 500, 200, 50)
+        xgb_lr    = st.number_input("XGB/LGB — Learning Rate", 0.001, 0.3, 0.05, 0.005)
+        n_cv      = st.slider("Folds CV Temporal", 3, 10, 5)
+
+    with st.expander("Parâmetros LSTM / GRU"):
+        dl_seq_len   = st.slider("Seq. Length", 5, 60, 20)
+        dl_hidden    = st.slider("Hidden Size", 16, 256, 64, 16)
+        dl_layers    = st.slider("Num Layers", 1, 4, 2)
+        dl_epochs    = st.slider("Épocas", 10, 200, 50, 10)
+        dl_batch     = st.slider("Batch Size", 8, 128, 32, 8)
+        dl_lr        = st.number_input("Learning Rate DL", 0.0001, 0.01, 0.001, format="%.4f")
+
+# ── Backtesting ───────────────────────────────────────────────────────────
+st.subheader("📊 Backtesting")
+bt_threshold = st.number_input("Threshold de Sinal", -0.05, 0.05, 0.0, 0.001, format="%.3f")
+bt_cost      = st.number_input("Custo de Transação (1-way, %)", 0.0, 1.0, 0.1, 0.01) / 100
+
+run_btn = st.button("🚀 Executar Análise", type="primary", use_container_width=True)
+
 
 # Store in session state (use distinct keys from widget keys)
 st.session_state["_tickers"] = tickers
@@ -96,28 +193,21 @@ st.session_state["_garch_q"] = garch_q
 st.session_state["run"] = run_btn or st.session_state.get("run", False)
 
 # Pages via tabs
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📊 Visão Geral & Dados",
     "📐 CAPM",
     "🔬 Fama-French",
-    "🌊 ARCH/GARCH"
+    "🌊 ARCH/GARCH",
+    "🤖 ML & Backtesting"
 ])
 
 if not st.session_state.get("run"):
-    for tab in [tab1, tab2, tab3, tab4]:
-        with tab:
+    #tab1, tab2, tab3, tab4, tab5 = st.tabs(["Visão Geral","CAPM","Fama-French","ARCH/GARCH","ML & Backtesting"])
+    for t in [tab1,tab2,tab3,tab4,tab5]:
+        with t:
             st.info("👈 Configure os parâmetros na barra lateral e clique em **Executar Análise** para começar.")
     st.stop()
 
-# Load data (shared across tabs)
-from modules.data_loader import load_data
-from modules.capm import run_capm
-from modules.fama_french import run_fama_french
-from modules.garch import run_garch
-import plotly.graph_objects as go
-import plotly.express as px
-import pandas as pd
-import numpy as np
 
 with st.spinner("Baixando dados de mercado..."):
     data = load_data(tickers, benchmark, start_str, end_str)
@@ -148,12 +238,31 @@ with tab1:
 
     st.subheader("Estatísticas Descritivas dos Retornos Diários")
     stats = returns.describe().T
+#######Adicionando a parte de risco
+    risk_metrics = {}
+
+    for ticker in returns.columns:
+
+        risk_metrics[ticker] = (
+            compute_risk_metrics(
+                returns[ticker].dropna(),
+                risk_free_rate
+            )
+        )
+
+    risk_df = pd.DataFrame(
+        risk_metrics
+    ).T
+
     stats["skewness"] = returns.skew()
     stats["kurtosis"] = returns.kurtosis()
     stats["annualized_return"] = (1 + returns.mean()) ** 252 - 1
     stats["annualized_vol"] = returns.std() * np.sqrt(252)
-    stats["sharpe"] = (stats["annualized_return"] - risk_free_rate) / stats["annualized_vol"]
-    display_cols = ["mean", "std", "min", "max", "skewness", "kurtosis", "annualized_return", "annualized_vol", "sharpe"]
+    #stats["sharpe"] = (stats["annualized_return"] - risk_free_rate) / stats["annualized_vol"]
+    stats["sharpe"] = (    stats["annualized_return"]    - risk_free_rate) / stats["annualized_vol"] #####
+    stats = stats.join(risk_df)
+    display_cols = ["mean", "std", "min", "max", "skewness", "kurtosis", "annualized_return", "annualized_vol", "sharpe", "CV", "Jarque-Bera", "JB p-value", "Ljung-Box p-value",
+    "ARCH p-value", "VaR 95%", "CVaR 95%","Sortino"]
     rename = {
         "mean": "Retorno Médio Diário", "std": "Desvio Padrão Diário",
         "min": "Mínimo", "max": "Máximo",
@@ -168,6 +277,34 @@ with tab1:
             .background_gradient(cmap="RdYlGn_r", subset=["Volatilidade Anualizada"]),
         use_container_width=True
     )
+
+    st.subheader("Diagnóstico Estatístico")
+
+    for ticker in returns.columns:
+
+        m = risk_metrics[ticker]
+
+        with st.expander(f"📊 {ticker}"):
+
+            st.write(
+                f"Normalidade (JB): "
+                f"{'✅' if m['JB p-value'] > 0.05 else '❌'}"
+            )
+
+            st.write(
+                f"Autocorrelação (Ljung-Box): "
+                f"{'❌ Presente' if m['Ljung-Box p-value'] < 0.05 else '✅ Não detectada'}"
+            )
+
+            st.write(
+                f"Efeito ARCH: "
+                f"{'✅ Sim' if m['ARCH p-value'] < 0.05 else '❌ Não'}"
+            )
+
+            st.write(f"VaR(95%): {m['VaR 95%']:.2%}")
+            st.write(f"CVaR(95%): {m['CVaR 95%']:.2%}")
+            st.write(f"Sortino: {m['Sortino']:.2f}")
+
 
     st.subheader("Matriz de Correlação")
     corr = returns.corr()
@@ -305,7 +442,10 @@ with tab4:
         col4.metric("Persistência (α+β)", f"{garch_res['persistence']:.4f}",
                     delta="Alta" if garch_res['persistence'] > 0.95 else "Moderada",
                     delta_color="off")
-
+        # 
+        col5, col6 = st.columns(2)
+        col5.metric("VaR GARCH (95%)", f"{garch_res['var_garch_95']:.2%}" )
+        col6.metric("Volatilidade Prevista", f"{garch_res['forecast_vol'][0]:.2%}")
         st.markdown("#### Volatilidade Condicional Estimada vs Retornos")
         fig_g = go.Figure()
         fig_g.add_trace(go.Scatter(
@@ -371,5 +511,298 @@ with tab4:
     else:
         st.error("Não foi possível ajustar o modelo GARCH. Tente aumentar o período de análise.")
 
-st.divider()
-st.caption("📌 Fase I — Filtro de Risco e Econometria | Projeto de Suporte à Decisão de Investimentos")
+    # ─── TAB 5: ML & BACKTESTING ──────────────────────────────────────────────────
+with tab5:
+    st.subheader("🤖 Motor Preditivo — Machine Learning & Deep Learning")
+
+    # Validate ticker selection
+    if ml_ticker not in returns.columns:
+        st.error(f"Ticker '{ml_ticker}' não disponível nos dados carregados.")
+        st.stop()
+
+    with st.spinner("Construindo features..."):
+        from modules.features import build_features, train_test_split_ts
+        df_feat = build_features(returns[ml_ticker], horizon=ml_horizon)
+
+    if len(df_feat) < 100:
+        st.warning("Dados insuficientes para treinar os modelos. Aumente o período de análise.")
+        st.stop()
+
+    X_train, y_train, X_test, y_test, feat_cols = train_test_split_ts(df_feat, test_ratio=ml_test_ratio)
+    st.caption(f"Treino: {len(X_train)} obs | Teste: {len(X_test)} obs | Features: {len(feat_cols)}")
+
+    model_tabs = st.tabs(["🌲 Random Forest", "⚡ XGBoost", "💡 LightGBM", "🧠 LSTM", "🔄 GRU", "📊 Backtesting"])
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+    def _plot_predictions(y_true, y_pred, dates, title):
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=dates, y=y_true, mode="lines", name="Real", line=dict(color="steelblue")))
+        fig.add_trace(go.Scatter(x=dates, y=y_pred, mode="lines", name="Previsto",
+                                  line=dict(color="orange", dash="dash")))
+        fig.update_layout(height=350, title=title, hovermode="x unified",
+                          legend=dict(orientation="h", yanchor="bottom", y=1.02))
+        return fig
+
+    def _plot_feature_importance(fi: pd.Series, top_n: int = 15):
+        fi_top = fi.head(top_n)
+        fig = go.Figure(go.Bar(x=fi_top.values[::-1], y=fi_top.index[::-1],
+                                orientation="h", marker_color="steelblue"))
+        fig.update_layout(height=max(300, top_n * 22), title=f"Top {top_n} Features",
+                          xaxis_title="Importância")
+        return fig
+
+    def _show_cv_metrics(cv_df: pd.DataFrame):
+        st.markdown("**Validação Cruzada Temporal**")
+        mean_row = cv_df.mean().rename("Média").to_frame().T
+        std_row  = cv_df.std().rename("Desvio Padrão").to_frame().T
+        summary  = pd.concat([cv_df, mean_row, std_row])
+        st.dataframe(summary.style.format("{:.4f}")
+                     .background_gradient(cmap="RdYlGn", subset=["Acurácia Direcional"])
+                     .background_gradient(cmap="RdYlGn_r", subset=["RMSE"]),
+                     use_container_width=True)
+
+    def _show_metrics(test_m, train_m):
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric("RMSE (Teste)",  f"{test_m['RMSE']:.6f}")
+        c2.metric("MAE (Teste)",   f"{test_m['MAE']:.6f}")
+        c3.metric("Dir. Acc.",     f"{test_m['Acurácia Direcional']:.2%}")
+        c4.metric("Corr. IC",      f"{test_m['Correlação IC']:.4f}")
+
+    # ── Random Forest ─────────────────────────────────────────────────────────
+    with model_tabs[0]:
+        st.markdown("#### Random Forest Regressor")
+        if st.button("Treinar Random Forest", key="btn_rf"):
+            with st.spinner("Treinando Random Forest..."):
+                rf_res = run_random_forest(X_train, y_train, X_test, y_test,
+                                           n_estimators=rf_n_est, max_depth=rf_depth,
+                                           n_cv_splits=n_cv)
+            st.session_state["rf_res"] = rf_res
+
+        if "rf_res" in st.session_state:
+            r = st.session_state["rf_res"]
+            _show_metrics(r["test_metrics"], r["train_metrics"])
+            _show_cv_metrics(r["cv_results"])
+            col_l, col_r = st.columns([2, 1])
+            with col_l:
+                st.plotly_chart(_plot_predictions(
+                    r["y_test"].values, r["preds_test"],
+                    r["X_test"].index, "Random Forest — Teste"
+                ), use_container_width=True)
+            with col_r:
+                st.plotly_chart(_plot_feature_importance(r["feature_importance"]), use_container_width=True)
+            st.session_state["last_preds"] = {"preds": r["preds_test"],
+                                               "y_true": r["y_test"].values,
+                                               "dates": r["X_test"].index,
+                                               "model": "Random Forest"}
+
+    # ── XGBoost ───────────────────────────────────────────────────────────────
+    with model_tabs[1]:
+        st.markdown("#### XGBoost Regressor")
+        if not HAS_XGB:
+            st.warning("XGBoost não instalado. Execute: `pip install xgboost`")
+        else:
+            if st.button("Treinar XGBoost", key="btn_xgb"):
+                with st.spinner("Treinando XGBoost..."):
+                    xgb_res = run_xgboost(X_train, y_train, X_test, y_test,
+                                          n_estimators=xgb_n_est, learning_rate=xgb_lr,
+                                          n_cv_splits=n_cv)
+                st.session_state["xgb_res"] = xgb_res
+
+            if "xgb_res" in st.session_state and st.session_state["xgb_res"]:
+                r = st.session_state["xgb_res"]
+                _show_metrics(r["test_metrics"], r["train_metrics"])
+                _show_cv_metrics(r["cv_results"])
+                col_l, col_r = st.columns([2, 1])
+                with col_l:
+                    st.plotly_chart(_plot_predictions(
+                        r["y_test"].values, r["preds_test"],
+                        r["X_test"].index, "XGBoost — Teste"
+                    ), use_container_width=True)
+                with col_r:
+                    st.plotly_chart(_plot_feature_importance(r["feature_importance"]), use_container_width=True)
+                st.session_state["last_preds"] = {"preds": r["preds_test"],
+                                                   "y_true": r["y_test"].values,
+                                                   "dates": r["X_test"].index,
+                                                   "model": "XGBoost"}
+
+    # ── LightGBM ──────────────────────────────────────────────────────────────
+    with model_tabs[2]:
+        st.markdown("#### LightGBM Regressor")
+        if not HAS_LGB:
+            st.warning("LightGBM não instalado. Execute: `pip install lightgbm`")
+        else:
+            if st.button("Treinar LightGBM", key="btn_lgb"):
+                with st.spinner("Treinando LightGBM..."):
+                    lgb_res = run_lightgbm(X_train, y_train, X_test, y_test,
+                                           n_estimators=xgb_n_est, learning_rate=xgb_lr,
+                                           n_cv_splits=n_cv)
+                st.session_state["lgb_res"] = lgb_res
+
+            if "lgb_res" in st.session_state and st.session_state["lgb_res"]:
+                r = st.session_state["lgb_res"]
+                _show_metrics(r["test_metrics"], r["train_metrics"])
+                _show_cv_metrics(r["cv_results"])
+                col_l, col_r = st.columns([2, 1])
+                with col_l:
+                    st.plotly_chart(_plot_predictions(
+                        r["y_test"].values, r["preds_test"],
+                        r["X_test"].index, "LightGBM — Teste"
+                    ), use_container_width=True)
+                with col_r:
+                    st.plotly_chart(_plot_feature_importance(r["feature_importance"]), use_container_width=True)
+                st.session_state["last_preds"] = {"preds": r["preds_test"],
+                                                   "y_true": r["y_test"].values,
+                                                   "dates": r["X_test"].index,
+                                                   "model": "LightGBM"}
+
+    # ── LSTM ──────────────────────────────────────────────────────────────────
+    with model_tabs[3]:
+        st.markdown("#### LSTM — Long Short-Term Memory")
+        if not HAS_TORCH:
+            st.warning("PyTorch não instalado. Execute: `pip install torch`")
+        else:
+            if st.button("Treinar LSTM", key="btn_lstm"):
+                progress_bar = st.progress(0)
+                status_txt   = st.empty()
+                def _cb(epoch, total, loss):
+                    progress_bar.progress(epoch / total)
+                    status_txt.text(f"Época {epoch}/{total} — Loss: {loss:.6f}")
+                with st.spinner("Treinando LSTM..."):
+                    lstm_res = run_lstm(X_train, y_train, X_test, y_test,
+                                        seq_len=dl_seq_len, hidden_size=dl_hidden,
+                                        num_layers=dl_layers, epochs=dl_epochs,
+                                        batch_size=dl_batch, lr=dl_lr,
+                                        progress_cb=_cb)
+                progress_bar.empty(); status_txt.empty()
+                st.session_state["lstm_res"] = lstm_res
+
+            if "lstm_res" in st.session_state and st.session_state["lstm_res"]:
+                r = st.session_state["lstm_res"]
+                _show_metrics(r["test_metrics"], r["train_metrics"])
+
+                col_l, col_r = st.columns([2, 1])
+                with col_l:
+                    st.plotly_chart(_plot_predictions(
+                        r["y_test"], r["preds_test"],
+                        X_test.index[-len(r["y_test"]):], "LSTM — Teste"
+                    ), use_container_width=True)
+                with col_r:
+                    fig_loss = go.Figure(go.Scatter(y=r["train_losses"], mode="lines",
+                                                     line=dict(color="orange")))
+                    fig_loss.update_layout(height=320, title="Curva de Loss (Treino)",
+                                           xaxis_title="Época", yaxis_title="MSE Loss")
+                    st.plotly_chart(fig_loss, use_container_width=True)
+
+                st.session_state["last_preds"] = {"preds": r["preds_test"],
+                                                   "y_true": r["y_test"],
+                                                   "dates": X_test.index[-len(r["y_test"]):],
+                                                   "model": "LSTM"}
+
+    # ── GRU ───────────────────────────────────────────────────────────────────
+    with model_tabs[4]:
+        st.markdown("#### GRU — Gated Recurrent Unit")
+        if not HAS_TORCH:
+            st.warning("PyTorch não instalado. Execute: `pip install torch`")
+        else:
+            if st.button("Treinar GRU", key="btn_gru"):
+                progress_bar2 = st.progress(0)
+                status_txt2   = st.empty()
+                def _cb2(epoch, total, loss):
+                    progress_bar2.progress(epoch / total)
+                    status_txt2.text(f"Época {epoch}/{total} — Loss: {loss:.6f}")
+                with st.spinner("Treinando GRU..."):
+                    gru_res = run_gru(X_train, y_train, X_test, y_test,
+                                      seq_len=dl_seq_len, hidden_size=dl_hidden,
+                                      num_layers=dl_layers, epochs=dl_epochs,
+                                      batch_size=dl_batch, lr=dl_lr,
+                                      progress_cb=_cb2)
+                progress_bar2.empty(); status_txt2.empty()
+                st.session_state["gru_res"] = gru_res
+
+            if "gru_res" in st.session_state and st.session_state["gru_res"]:
+                r = st.session_state["gru_res"]
+                _show_metrics(r["test_metrics"], r["train_metrics"])
+                col_l, col_r = st.columns([2, 1])
+                with col_l:
+                    st.plotly_chart(_plot_predictions(
+                        r["y_test"], r["preds_test"],
+                        X_test.index[-len(r["y_test"]):], "GRU — Teste"
+                    ), use_container_width=True)
+                with col_r:
+                    fig_loss2 = go.Figure(go.Scatter(y=r["train_losses"], mode="lines",
+                                                      line=dict(color="orange")))
+                    fig_loss2.update_layout(height=320, title="Curva de Loss (Treino)",
+                                            xaxis_title="Época", yaxis_title="MSE Loss")
+                    st.plotly_chart(fig_loss2, use_container_width=True)
+                st.session_state["last_preds"] = {"preds": r["preds_test"],
+                                                   "y_true": r["y_test"],
+                                                   "dates": X_test.index[-len(r["y_test"]):],
+                                                   "model": "GRU"}
+
+    # ── BACKTESTING ───────────────────────────────────────────────────────────
+    with model_tabs[5]:
+        st.markdown("#### Backtesting — Estratégia Long/Flat")
+        if "last_preds" not in st.session_state:
+            st.info("Treine pelo menos um modelo acima para habilitar o backtesting.")
+        else:
+            lp = st.session_state["last_preds"]
+            st.caption(f"Usando previsões do modelo: **{lp['model']}** | {len(lp['preds'])} observações")
+
+            bt = run_backtest(
+                y_true=lp["y_true"],
+                y_pred=lp["preds"],
+                dates=lp["dates"],
+                threshold=bt_threshold,
+                transaction_cost=bt_cost,
+                rf_annual=risk_free_rate,
+            )
+
+            # ── Equity Curves ──
+            st.markdown("**Curvas de Equity**")
+            fig_eq = go.Figure()
+            fig_eq.add_trace(go.Scatter(x=bt["dates"], y=bt["strat_equity"],
+                                         mode="lines", name=f"Estratégia ({lp['model']})",
+                                         line=dict(color="steelblue")))
+            fig_eq.add_trace(go.Scatter(x=bt["dates"], y=bt["bh_equity"],
+                                         mode="lines", name="Buy & Hold",
+                                         line=dict(color="gray", dash="dash")))
+            fig_eq.update_layout(height=360, hovermode="x unified",
+                                  yaxis_title="Valor da Carteira (R$1 inicial)",
+                                  legend=dict(orientation="h", yanchor="bottom", y=1.02))
+            st.plotly_chart(fig_eq, use_container_width=True)
+
+            # ── Drawdown ──
+            fig_dd = go.Figure()
+            fig_dd.add_trace(go.Scatter(x=bt["dates"], y=bt["strat_dd"]*100,
+                                         fill="tozeroy", mode="lines",
+                                         name="Drawdown Estratégia", line=dict(color="red")))
+            fig_dd.add_trace(go.Scatter(x=bt["dates"], y=bt["bh_dd"]*100,
+                                         fill="tozeroy", mode="lines",
+                                         name="Drawdown B&H", line=dict(color="orange", dash="dash")))
+            fig_dd.update_layout(height=250, yaxis_title="Drawdown (%)",
+                                  legend=dict(orientation="h", yanchor="bottom", y=1.02))
+            st.plotly_chart(fig_dd, use_container_width=True)
+
+            # ── Statistics ──
+            st.markdown("**Estatísticas de Performance**")
+            df_stats = pd.DataFrame({
+                f"Estratégia ({lp['model']})": bt["strat_stats"],
+                "Buy & Hold": bt["bh_stats"],
+            })
+            fmt = {c: "{:.2%}" if "Ret" in c or "Vol" in c or "Draw" in c or "Taxa" in c else "{:.4f}"
+                   for c in df_stats.index}
+            st.dataframe(df_stats.style.format("{:.4f}"), use_container_width=True)
+
+            c1, c2 = st.columns(2)
+            c1.metric("Nº de Operações", bt["n_trades"])
+            c2.metric("Custo Total Estimado", f"{bt['n_trades'] * bt_cost:.2%}")
+
+            # ── Monthly returns ──
+            st.markdown("**Retornos Mensais da Estratégia**")
+            mr = bt["monthly_returns"]
+            colors = ["#2ca02c" if v >= 0 else "#d62728" for v in mr.values]
+            fig_mr = go.Figure(go.Bar(x=mr.index.strftime("%Y-%m"), y=mr.values*100,
+                                       marker_color=colors))
+            fig_mr.update_layout(height=280, yaxis_title="Retorno (%)",
+                                  xaxis_tickangle=-45)
+            st.plotly_chart(fig_mr, use_container_width=True)
